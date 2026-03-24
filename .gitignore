@@ -25,19 +25,7 @@ local.properties
 
 # Android Studio
 *.iml
-.idea/caches/
-.idea/libraries/
-.idea/modules.xml
-.idea/workspace.xml
-.idea/navEditor.xml
-.idea/assetWizardSettings.xml
-.idea/compiler.xml
-.idea/jarRepositories.xml
-.idea/deploymentTargetSelector.xml
-.idea/kotlinc.xml
-.idea/.name
-.idea/vcs.xml
-.idea/dictionaries
+.idea/
 
 # Keystore files (보안)
 *.jks
