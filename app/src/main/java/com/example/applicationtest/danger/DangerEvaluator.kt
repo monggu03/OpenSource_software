@@ -22,8 +22,7 @@ class DangerEvaluator {
         }
 
         val mostDangerous = detections
-            .sortedByDescending { it.areaRatio * (if (it.isInPath) 2f else 1f) }
-            .first()
+            .maxBy { it.areaRatio * (if (it.isInPath) 2f else 1f) }
 
         val level = assessLevel(mostDangerous)
         val now = System.currentTimeMillis()

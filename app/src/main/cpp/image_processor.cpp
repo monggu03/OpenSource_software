@@ -32,12 +32,12 @@ void ImageProcessor::preprocess(
 
     int area = targetSize * targetSize;
     for (int y = 0; y < targetSize; y++) {
-        for (int x = 0; x < targetSize; x++) {
-            cv::Vec3b pixel = padded.at<cv::Vec3b>(y, x);
-            int idx = y * targetSize + x;
-            output[idx]            = pixel[0] / 255.0f;
-            output[area + idx]     = pixel[1] / 255.0f;
-            output[2 * area + idx] = pixel[2] / 255.0f;
+        const uchar* row = padded.ptr<uchar>(y);
+        int idx = y * targetSize;
+        for (int x = 0; x < targetSize; x++, idx++) {
+            output[idx]            = row[x * 3]     / 255.0f;
+            output[area + idx]     = row[x * 3 + 1] / 255.0f;
+            output[2 * area + idx] = row[x * 3 + 2] / 255.0f;
         }
     }
 }

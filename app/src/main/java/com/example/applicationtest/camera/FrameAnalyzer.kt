@@ -9,17 +9,9 @@ class FrameAnalyzer(
     private val onFrame: (Bitmap) -> Unit
 ) : ImageAnalysis.Analyzer {
 
-    private var frameCount = 0
-    private val analyzeEveryNFrames = 3
-
+    // STRATEGY_KEEP_ONLY_LATEST가 이미 바쁠 때 프레임을 드롭하므로
+    // 수동 프레임 스킵 불필요 — 매 프레임 분석
     override fun analyze(imageProxy: ImageProxy) {
-        frameCount++
-
-        if (frameCount % analyzeEveryNFrames != 0) {
-            imageProxy.close()
-            return
-        }
-
         try {
             val bitmap = imageProxyToBitmap(imageProxy)
             if (bitmap != null) {
@@ -43,7 +35,9 @@ class FrameAnalyzer(
         val rotation = imageProxy.imageInfo.rotationDegrees
         return if (rotation != 0) {
             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            bitmap.recycle()
+            rotated
         } else {
             bitmap
         }

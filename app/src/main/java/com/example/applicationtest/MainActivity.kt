@@ -16,9 +16,10 @@ import com.example.applicationtest.alert.TTSManager
 import com.example.applicationtest.alert.VibrationManager
 import com.example.applicationtest.camera.FrameAnalyzer
 import com.example.applicationtest.danger.DangerEvaluator
-import com.example.applicationtest.detector.DetectionResult
+import com.example.applicationtest.detector.ObjectTracker
 import com.example.applicationtest.detector.YoloDetector
 import com.example.applicationtest.ui.OverlayView
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -36,17 +37,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var detectionText: TextView
 
     private lateinit var yoloDetector: YoloDetector
+    private lateinit var objectTracker: ObjectTracker
     private lateinit var dangerEvaluator: DangerEvaluator
     private lateinit var ttsManager: TTSManager
     private lateinit var vibrationManager: VibrationManager
 
     private lateinit var cameraExecutor: ExecutorService
+    @Volatile
     private var isDetecting = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
 
         previewView = findViewById(R.id.previewView)
         overlayView = findViewById(R.id.overlayView)
@@ -54,6 +56,7 @@ class MainActivity : AppCompatActivity() {
         detectionText = findViewById(R.id.detectionText)
 
         yoloDetector = YoloDetector(this)
+        objectTracker = ObjectTracker()
         dangerEvaluator = DangerEvaluator()
         ttsManager = TTSManager(this)
         vibrationManager = VibrationManager(this)
@@ -92,6 +95,7 @@ class MainActivity : AppCompatActivity() {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
+            @Suppress("DEPRECATION")
             val imageAnalysis = ImageAnalysis.Builder()
                 .setTargetResolution(android.util.Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -99,21 +103,28 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             val frameAnalyzer = FrameAnalyzer { bitmap ->
-                if (!isDetecting) return@FrameAnalyzer
+                if (!isDetecting) {
+                    bitmap.recycle()
+                    return@FrameAnalyzer
+                }
 
-                val detections = yoloDetector.detect(bitmap)
+                val imgWidth = bitmap.width
+                val imgHeight = bitmap.height
+                val rawDetections = yoloDetector.detect(bitmap)
+                bitmap.recycle()
+                val detections = objectTracker.update(rawDetections)
                 val dangerResult = dangerEvaluator.evaluate(detections)
 
                 runOnUiThread {
-                    overlayView.setDetections(detections)
+                    overlayView.setDetections(detections, imgWidth, imgHeight)
 
                     if (detections.isNotEmpty()) {
                         val debugInfo = detections.joinToString("\n") { d ->
                             val b = d.boundingBox
                             "${d.label} ${(d.confidence * 100).toInt()}% " +
-                            "box(${String.format("%.2f", b.left)},${String.format("%.2f", b.top)}," +
-                            "${String.format("%.2f", b.right)},${String.format("%.2f", b.bottom)}) " +
-                            "area=${String.format("%.3f", d.areaRatio)}"
+                            "box(${String.format(Locale.US, "%.2f", b.left)},${String.format(Locale.US, "%.2f", b.top)}," +
+                            "${String.format(Locale.US, "%.2f", b.right)},${String.format(Locale.US, "%.2f", b.bottom)}) " +
+                            "area=${String.format(Locale.US, "%.3f", d.areaRatio)}"
                         }
                         detectionText.text = debugInfo
                         statusText.text = yoloDetector.debugInfo

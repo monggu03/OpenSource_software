@@ -24,7 +24,20 @@ Java_com_example_applicationtest_detector_NativeLib_preprocessImage(
     }
 
     int outputSize = 3 * targetSize * targetSize;
-    float* outputData = new float[outputSize];
+
+    jfloatArray result = env->NewFloatArray(outputSize);
+    if (result == nullptr) {
+        env->ReleaseIntArrayElements(pixels, pixelData, JNI_ABORT);
+        LOGE("JNI float array 할당 실패");
+        return nullptr;
+    }
+
+    float* outputData = (float*)env->GetPrimitiveArrayCritical(result, nullptr);
+    if (outputData == nullptr) {
+        env->ReleaseIntArrayElements(pixels, pixelData, JNI_ABORT);
+        LOGE("GetPrimitiveArrayCritical 실패");
+        return nullptr;
+    }
 
     ImageProcessor::preprocess(
         (const int*)pixelData,
@@ -34,12 +47,8 @@ Java_com_example_applicationtest_detector_NativeLib_preprocessImage(
         outputData
     );
 
+    env->ReleasePrimitiveArrayCritical(result, outputData, 0);
     env->ReleaseIntArrayElements(pixels, pixelData, JNI_ABORT);
-
-    jfloatArray result = env->NewFloatArray(outputSize);
-    env->SetFloatArrayRegion(result, 0, outputSize, outputData);
-
-    delete[] outputData;
 
     LOGD("전처리 완료: %dx%d -> %dx%d", (int)width, (int)height, (int)targetSize, (int)targetSize);
     return result;

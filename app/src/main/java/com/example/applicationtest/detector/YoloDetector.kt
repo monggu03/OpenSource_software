@@ -28,6 +28,11 @@ class YoloDetector(private val context: Context) {
     private var interpreter: Interpreter? = null
     private var labels: List<String> = emptyList()
     private var isInitialized = false
+    private var inputIsNHWC = true
+    private var inputBuffer: ByteBuffer? = null
+    private var outputBuffer: ByteBuffer? = null
+    private var outputShape: IntArray = intArrayOf()
+    private var totalOutputElements = 0
     var debugInfo: String = ""
         private set
 
@@ -46,28 +51,44 @@ class YoloDetector(private val context: Context) {
         val modelBuffer = loadModelFile(MODEL_FILE)
         val options = Interpreter.Options().apply {
             setNumThreads(4)
+            @Suppress("DEPRECATION")
+            setUseNNAPI(true)  // 하드웨어 가속 (GPU/DSP/NPU)
         }
+
         interpreter = Interpreter(modelBuffer, options)
         Log.d(TAG, "모델 로딩 완료: $MODEL_FILE")
 
         val inputTensor = interpreter!!.getInputTensor(0)
         val outputTensor = interpreter!!.getOutputTensor(0)
-        Log.d(TAG, "입력 shape: ${inputTensor.shape().contentToString()}")
-        Log.d(TAG, "출력 shape: ${outputTensor.shape().contentToString()}")
+        val inputShape = inputTensor.shape()
+        inputIsNHWC = inputShape.size == 4 && inputShape[3] == 3
+
+        // ByteBuffer 사전할당 (매 프레임 GC 방지)
+        val inputSize = inputShape.fold(1) { acc, v -> acc * v }
+        inputBuffer = ByteBuffer.allocateDirect(inputSize * 4).order(ByteOrder.nativeOrder())
+
+        outputShape = outputTensor.shape()
+        totalOutputElements = outputShape.fold(1) { acc, v -> acc * v }
+        outputBuffer = ByteBuffer.allocateDirect(totalOutputElements * 4).order(ByteOrder.nativeOrder())
+
+        Log.d(TAG, "입력 shape: ${inputShape.contentToString()}, 포맷: ${if (inputIsNHWC) "NHWC" else "NCHW"}")
+        Log.d(TAG, "출력 shape: ${outputShape.contentToString()}")
     }
 
     private fun loadModelFile(filename: String): MappedByteBuffer {
         val fileDescriptor = context.assets.openFd(filename)
-        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-        val fileChannel = inputStream.channel
-        val startOffset = fileDescriptor.startOffset
-        val declaredLength = fileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        return fileDescriptor.use { fd ->
+            FileInputStream(fd.fileDescriptor).use { inputStream ->
+                val fileChannel = inputStream.channel
+                fileChannel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+            }
+        }
     }
 
     private fun loadLabels() {
-        val inputStream = context.assets.open(LABELS_FILE)
-        labels = BufferedReader(InputStreamReader(inputStream)).readLines()
+        labels = context.assets.open(LABELS_FILE).use { stream ->
+            BufferedReader(InputStreamReader(stream)).readLines()
+        }
         Log.d(TAG, "라벨 로딩 완료: ${labels.size}개 클래스")
     }
 
@@ -80,63 +101,43 @@ class YoloDetector(private val context: Context) {
             val pixels = IntArray(width * height)
             bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
+            val letterboxScale = minOf(INPUT_SIZE.toFloat() / width, INPUT_SIZE.toFloat() / height)
+            val scaledW = (width * letterboxScale).toInt()
+            val scaledH = (height * letterboxScale).toInt()
+            val padX = (INPUT_SIZE - scaledW) / 2f
+            val padY = (INPUT_SIZE - scaledH) / 2f
+
             val preprocessed: FloatArray = try {
-                NativeLib.preprocessImage(pixels, width, height, INPUT_SIZE)
+                val chwData = NativeLib.preprocessImage(pixels, width, height, INPUT_SIZE)
+                if (inputIsNHWC) chwToHwc(chwData, INPUT_SIZE) else chwData
             } catch (e: UnsatisfiedLinkError) {
                 Log.w(TAG, "C++ 전처리 실패, Kotlin fallback 사용: ${e.message}")
                 preprocessFallback(bitmap)
             }
 
-            val inputBuffer = floatArrayToByteBuffer(preprocessed)
+            // 사전할당 버퍼 재사용 (매 프레임 GC 방지)
+            val inBuf = inputBuffer!!
+            inBuf.rewind()
+            inBuf.asFloatBuffer().put(preprocessed)
 
-            // flat buffer로 출력 받기 (shape 무관하게 안전)
-            val outputTensor = interpreter!!.getOutputTensor(0)
-            val outputShape = outputTensor.shape()
-            val totalElements = outputShape.fold(1) { acc, v -> acc * v }
-            val outputBuffer = ByteBuffer.allocateDirect(totalElements * 4)
-                .order(ByteOrder.nativeOrder())
-            interpreter!!.run(inputBuffer, outputBuffer)
-            outputBuffer.rewind()
-            val flatOutput = FloatArray(totalElements)
-            outputBuffer.asFloatBuffer().get(flatOutput)
+            val outBuf = outputBuffer!!
+            outBuf.rewind()
+            interpreter!!.run(inBuf, outBuf)
+            outBuf.rewind()
+            val flatOutput = FloatArray(totalOutputElements)
+            outBuf.asFloatBuffer().get(flatOutput)
 
-            Log.d(TAG, "출력 shape: ${outputShape.contentToString()}, total=$totalElements")
+            val results = parseFlat(flatOutput, outputShape, padX, padY, scaledW.toFloat(), scaledH.toFloat())
+            val filtered = results.filter { it.classId in TARGET_CLASSES }
 
-            // 디버그: 가장 높은 confidence를 가진 detection의 raw 값 표시
-            val dim1 = outputShape[1]  // 84
-            val dim2 = outputShape[2]  // 8400
-            val numDet = dim2  // 8400 detections
-
-            // ColMajor [1,84,8400]: conf for det i = max(data[(4..83)*8400+i])
-            var bestIdx = 0
-            var bestConf = 0f
-            for (i in 0 until numDet) {
-                for (c in 4 until 84) {
-                    val v = flatOutput[c * numDet + i]
-                    if (v > bestConf) {
-                        bestConf = v
-                        bestIdx = i
-                    }
-                }
+            if (filtered.isNotEmpty()) {
+                val best = filtered.maxBy { it.confidence }
+                debugInfo = "감지 ${filtered.size}개, best: ${best.label} ${(best.confidence * 100).toInt()}%"
+            } else {
+                debugInfo = ""
             }
-            val colCx = flatOutput[0 * numDet + bestIdx]
-            val colCy = flatOutput[1 * numDet + bestIdx]
-            val colW = flatOutput[2 * numDet + bestIdx]
-            val colH = flatOutput[3 * numDet + bestIdx]
 
-            // RowMajor [1,8400,84]: same detection at row bestIdx
-            val rowBase = bestIdx * 84
-            val rowCx = flatOutput[rowBase + 0]
-            val rowCy = flatOutput[rowBase + 1]
-            val rowW = flatOutput[rowBase + 2]
-            val rowH = flatOutput[rowBase + 3]
-
-            debugInfo = "shape[1,$dim1,$dim2] best#$bestIdx conf=${String.format("%.2f", bestConf)}\n" +
-                "Col: ${String.format("%.1f,%.1f,%.1f,%.1f", colCx, colCy, colW, colH)}\n" +
-                "Row: ${String.format("%.1f,%.1f,%.1f,%.1f", rowCx, rowCy, rowW, rowH)}"
-
-            val results = parseFlat(flatOutput, outputShape)
-            return results.filter { it.classId in TARGET_CLASSES }
+            return filtered
 
         } catch (e: Exception) {
             Log.e(TAG, "감지 오류: ${e.message}", e)
@@ -146,7 +147,11 @@ class YoloDetector(private val context: Context) {
 
     private fun parseFlat(
         data: FloatArray,
-        shape: IntArray
+        shape: IntArray,
+        padX: Float,
+        padY: Float,
+        scaledW: Float,
+        scaledH: Float
     ): List<DetectionResult> {
         val results = mutableListOf<DetectionResult>()
 
@@ -160,15 +165,6 @@ class YoloDetector(private val context: Context) {
         // dim1=8400, dim2=84 → [1,8400,84]: 각 행이 하나의 detection
         val isRowPerDetection = dim2 == numAttrs  // [1, 8400, 84]
         val numDetections = if (isRowPerDetection) dim1 else dim2
-
-        Log.d(TAG, "파싱: isRowPerDetection=$isRowPerDetection, numDetections=$numDetections")
-
-        // 첫 번째 detection의 raw 값 로그
-        if (isRowPerDetection) {
-            Log.d(TAG, "det[0] raw: cx=${data[0]}, cy=${data[1]}, w=${data[2]}, h=${data[3]}, classes=${data.slice(4..9)}")
-        } else {
-            Log.d(TAG, "det[0] raw: cx=${data[0]}, cy=${data[dim2]}, w=${data[2*dim2]}, h=${data[3*dim2]}")
-        }
 
         for (i in 0 until numDetections) {
             val cx: Float
@@ -208,12 +204,24 @@ class YoloDetector(private val context: Context) {
 
             if (maxConf < CONFIDENCE_THRESHOLD) continue
 
-            // 좌표가 픽셀이면 정규화, 이미 0~1이면 그대로
-            val scale = if (maxOf(cx, cy, w, h) > 1.0f) INPUT_SIZE.toFloat() else 1.0f
-            val ncx = cx / scale
-            val ncy = cy / scale
-            val nw = w / scale
-            val nh = h / scale
+            // letterbox 좌표 → 원본 이미지 좌표 (0~1) 역변환
+            val ncx: Float
+            val ncy: Float
+            val nw: Float
+            val nh: Float
+            if (maxOf(cx, cy, w, h) > 1.0f) {
+                // 픽셀 좌표: letterbox 패딩 제거 후 원본 비율로 정규화
+                ncx = (cx - padX) / scaledW
+                ncy = (cy - padY) / scaledH
+                nw = w / scaledW
+                nh = h / scaledH
+            } else {
+                // 이미 0~1: letterbox 640 기준으로 패딩 제거
+                ncx = (cx * INPUT_SIZE - padX) / scaledW
+                ncy = (cy * INPUT_SIZE - padY) / scaledH
+                nw = (w * INPUT_SIZE) / scaledW
+                nh = (h * INPUT_SIZE) / scaledH
+            }
 
             val left = (ncx - nw / 2f).coerceIn(0f, 1f)
             val top = (ncy - nh / 2f).coerceIn(0f, 1f)
@@ -269,25 +277,59 @@ class YoloDetector(private val context: Context) {
     }
 
     private fun preprocessFallback(bitmap: Bitmap): FloatArray {
-        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        val w = bitmap.width
+        val h = bitmap.height
+        val scale = minOf(INPUT_SIZE.toFloat() / w, INPUT_SIZE.toFloat() / h)
+        val newW = (w * scale).toInt()
+        val newH = (h * scale).toInt()
 
-        val floatArray = FloatArray(3 * INPUT_SIZE * INPUT_SIZE)
-        for (i in pixels.indices) {
-            val pixel = pixels[i]
-            floatArray[i] = ((pixel shr 16) and 0xFF) / 255.0f
-            floatArray[INPUT_SIZE * INPUT_SIZE + i] = ((pixel shr 8) and 0xFF) / 255.0f
-            floatArray[2 * INPUT_SIZE * INPUT_SIZE + i] = (pixel and 0xFF) / 255.0f
+        val resized = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+
+        // letterbox: 114/255 gray padding (matches C++ preprocess)
+        val padded = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(padded)
+        canvas.drawColor(android.graphics.Color.rgb(114, 114, 114))
+        val dx = (INPUT_SIZE - newW) / 2f
+        val dy = (INPUT_SIZE - newH) / 2f
+        canvas.drawBitmap(resized, dx, dy, null)
+        resized.recycle()
+
+        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
+        padded.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        padded.recycle()
+
+        val area = INPUT_SIZE * INPUT_SIZE
+        val floatArray = FloatArray(3 * area)
+
+        if (inputIsNHWC) {
+            // HWC: [R,G,B, R,G,B, ...] - TFLite 기본 포맷
+            for (i in pixels.indices) {
+                val pixel = pixels[i]
+                floatArray[i * 3 + 0] = ((pixel shr 16) and 0xFF) / 255.0f
+                floatArray[i * 3 + 1] = ((pixel shr 8) and 0xFF) / 255.0f
+                floatArray[i * 3 + 2] = (pixel and 0xFF) / 255.0f
+            }
+        } else {
+            // CHW: [R...R, G...G, B...B] - ONNX/PyTorch 포맷
+            for (i in pixels.indices) {
+                val pixel = pixels[i]
+                floatArray[i] = ((pixel shr 16) and 0xFF) / 255.0f
+                floatArray[area + i] = ((pixel shr 8) and 0xFF) / 255.0f
+                floatArray[2 * area + i] = (pixel and 0xFF) / 255.0f
+            }
         }
         return floatArray
     }
 
-    private fun floatArrayToByteBuffer(array: FloatArray): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(array.size * 4)
-        buffer.order(ByteOrder.nativeOrder())
-        buffer.asFloatBuffer().put(array)
-        return buffer
+    private fun chwToHwc(chw: FloatArray, size: Int): FloatArray {
+        val area = size * size
+        val hwc = FloatArray(3 * area)
+        for (i in 0 until area) {
+            hwc[i * 3 + 0] = chw[i]              // R
+            hwc[i * 3 + 1] = chw[area + i]        // G
+            hwc[i * 3 + 2] = chw[2 * area + i]    // B
+        }
+        return hwc
     }
 
     fun close() {
