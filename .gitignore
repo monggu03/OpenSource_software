@@ -1,15 +1,80 @@
-*.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
 /build
 /captures
-.externalNativeBuild
-.cxx
+
+# Local configuration file (sdk path, etc)
 local.properties
+
+# Android Studio
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/compiler.xml
+.idea/jarRepositories.xml
+.idea/deploymentTargetSelector.xml
+.idea/kotlinc.xml
+.idea/.name
+.idea/vcs.xml
+.idea/dictionaries
+
+# Keystore files (보안)
+*.jks
+*.keystore
+
+# External native build
+.externalNativeBuild/
+.cxx/
+
+# OpenCV SDK (너무 큼, git에 포함하지 않음)
+app/libs/OpenCV-android-sdk/
+
+# NDK
+obj/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Log files
+*.log
+
+# Signing config
+signing.properties
+
+# Google Services (API 키 포함 가능)
+google-services.json
+
+# Proguard
+proguard/
+
+# Node (혹시 사용 시)
+node_modules/
+
+# Crash reports
+crashlytics-build.properties
